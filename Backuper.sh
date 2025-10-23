@@ -8,8 +8,7 @@ set -euo pipefail
 # ========== User-configurable section ==========
 ###############################################
 
-# Version (برای نمایش در هدر)
-VERSION="${VERSION:-v1.1.0}"
+VERSION="${VERSION:-v1.2.0}"
 
 # Upstream Backuper (original menu by erfjab)
 UPSTREAM_BACKUPER_URL="${UPSTREAM_BACKUPER_URL:-https://github.com/erfjab/Backuper/raw/master/backuper.sh}"
@@ -17,21 +16,24 @@ UPSTREAM_CACHE_PATH="${UPSTREAM_CACHE_PATH:-/tmp/backuper_upstream.sh}"
 UPSTREAM_CACHE_TTL_HOURS="${UPSTREAM_CACHE_TTL_HOURS:-12}"
 
 # Install/uninstall
-INSTALL_BIN_NAME="${INSTALL_BIN_NAME:-lornaNET}"   # binary name in /usr/local/bin
+INSTALL_BIN_NAME="${INSTALL_BIN_NAME:-lornaNET}"
 INSTALL_BIN_PATH="/usr/local/bin/${INSTALL_BIN_NAME}"
 
 # Uptime Kuma backup settings
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/uptime-kuma}"
 RETENTION="${RETENTION:-7}"
 
-# Defaults (override only if می‌خواهی ثابت باشند؛ در حالت عادی auto-detect فعال است)
+# Auto-detect by default (می‌توانی دستی override کنی)
 KUMA_CONTAINER_NAME="${KUMA_CONTAINER_NAME:-}"
 KUMA_VOLUME_NAME="${KUMA_VOLUME_NAME:-}"
 
-# For SQLite consistency, stop the container briefly during backup/restore
+# Image names to try (بدون تگ و با تگ v2)
+KUMA_IMAGE_CANDIDATES="${KUMA_IMAGE_CANDIDATES:-louislam/uptime-kuma:2 louislam/uptime-kuma}"
+
+# For SQLite consistency
 STOP_DURING_BACKUP="${STOP_DURING_BACKUP:-true}"
 
-# Telegram notifications (optional)
+# Telegram (اختیاری)
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 TELEGRAM_MENTION="${TELEGRAM_MENTION:-@lorna_support}"
@@ -46,7 +48,7 @@ ensure_dir() { mkdir -p "$BACKUP_DIR"; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found."; exit 127; }; }
 
 # ANSI for menu
-RESET='\033[0m'; FG_CYAN='\033[36m'; FG_GREEN='\033[32m'; FG_YELLOW='\033[33m'; FG_WHITE='\033[37m'
+RESET='\033[0m'; FG_CYAN='\033[36m]'; FG_GREEN='\033[32m'; FG_YELLOW='\033[33m'; FG_WHITE='\033[37m'
 
 ###############################################
 # ======== Auto-detect Kuma container/volume ===
@@ -54,23 +56,33 @@ RESET='\033[0m'; FG_CYAN='\033[36m'; FG_GREEN='\033[32m'; FG_YELLOW='\033[33m'; 
 detect_kuma() {
   require_cmd docker
 
-  # 1) اگر نام کانتینر از قبل ست نشده، بر اساس ایمیج پیدا کن
+  # 1) کانتینر
   if [ -z "${KUMA_CONTAINER_NAME:-}" ]; then
-    # اول کانتینرهای در حال اجرا، بعد کل کانتینرها
-    KUMA_CONTAINER_NAME="$(docker ps --filter 'ancestor=louislam/uptime-kuma' --format '{{.Names}}' | head -n1 || true)"
-    [ -z "$KUMA_CONTAINER_NAME" ] && \
-      KUMA_CONTAINER_NAME="$(docker ps -a --filter 'ancestor=louislam/uptime-kuma' --format '{{.Names}}' | head -n1 || true)"
+    # تلاش با ancestor (اول ایمیج‌های کاندید، بعد بدون فیلتر و بر اساس اسم)
+    for img in ${KUMA_IMAGE_CANDIDATES}; do
+      KUMA_CONTAINER_NAME="$(docker ps --filter "ancestor=${img}" --format '{{.Names}}' | head -n1 || true)"
+      [ -n "${KUMA_CONTAINER_NAME}" ] && break
+    done
+    if [ -z "${KUMA_CONTAINER_NAME:-}" ]; then
+      for img in ${KUMA_IMAGE_CANDIDATES}; do
+        KUMA_CONTAINER_NAME="$(docker ps -a --filter "ancestor=${img}" --format '{{.Names}}' | head -n1 || true)"
+        [ -n "${KUMA_CONTAINER_NAME}" ] && break
+      done
+    fi
+    # اگر هنوز پیدا نشد، بر اساس اسم‌هایی که شامل uptime-kuma هستند
+    if [ -z "${KUMA_CONTAINER_NAME:-}" ]; then
+      KUMA_CONTAINER_NAME="$(docker ps -a --format '{{.Names}}' | grep -E -m1 '(^|[-_])uptime-kuma([-_]|$)' || true)"
+    fi
   fi
 
   if [ -z "${KUMA_CONTAINER_NAME:-}" ]; then
-    echo "ERROR: No container with image 'louislam/uptime-kuma' found."
+    echo "ERROR: No Uptime Kuma container found (image candidates: ${KUMA_IMAGE_CANDIDATES})."
     echo "Hint: run 'docker ps -a' and ensure Uptime Kuma is installed."
     exit 1
   fi
 
-  # 2) اگر نام ولیوم مشخص نیست، سعی کن از Mount مربوط به /app/data در همان کانتینر بخوانی
+  # 2) ولیوم (Mount مقصد /app/data). اگر bind باشد، Name خالی می‌ماند که اشکالی ندارد.
   if [ -z "${KUMA_VOLUME_NAME:-}" ]; then
-    # اگر Mount از نوع Volume باشد، اسم نام‌دار برمی‌گردد؛ اگر bind باشد، خروجی خالی است
     KUMA_VOLUME_NAME="$(docker inspect "$KUMA_CONTAINER_NAME" \
       -f '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true)"
   fi
@@ -131,8 +143,8 @@ pause() { read -rp "ادامه با Enter..." _ || true; }
 ###############################################
 kuma_backup() {
   detect_kuma
-  require_cmd docker
   ensure_dir
+
   local OUT="$BACKUP_DIR/uptime-kuma-$(timestamp).tar.gz"
 
   stop_container_if_requested
@@ -162,7 +174,6 @@ kuma_backup() {
 
 kuma_restore() {
   detect_kuma
-  require_cmd docker
   local ARCHIVE="${1:-}"
   if [ -z "$ARCHIVE" ] || [ ! -f "$ARCHIVE" ]; then
     echo "Usage: $0 kuma-restore /path/to/uptime-kuma-YYYYMMDD-HHMMSS.tar.gz"
@@ -242,14 +253,14 @@ run_upstream_menu() {
 ###############################################
 print_header() {
   clear
-  echo -e "${FG_CYAN}=======  Backuper Menu [${VERSION}]  =======${RESET}"
+  echo -e "\033[36m=======  Backuper Menu [${VERSION}]  =======\033[0m"
   echo
-  echo -e "  ${FG_GREEN}1)${RESET} ${FG_WHITE}Run ORIGINAL Backuper (erfjab)${RESET}"
-  echo -e "  ${FG_GREEN}2)${RESET} ${FG_WHITE}Uptime Kuma Backup${RESET}"
-  echo -e "  ${FG_GREEN}3)${RESET} ${FG_WHITE}Uptime Kuma Restore${RESET}"
-  echo -e "  ${FG_GREEN}0)${RESET} ${FG_WHITE}Exit${RESET}"
+  echo -e "  \033[32m1)\033[0m \033[37mRun ORIGINAL Backuper (erfjab)\033[0m"
+  echo -e "  \033[32m2)\033[0m \033[37mUptime Kuma Backup\033[0m"
+  echo -e "  \033[32m3)\033[0m \033[37mUptime Kuma Restore\033[0m"
+  echo -e "  \033[32m0)\033[0m \033[37mExit\033[0m"
   echo
-  echo -en "${FG_YELLOW}► Choose an option: ${RESET}"
+  echo -en "\033[33m► Choose an option: \033[0m"
 }
 
 main_menu() {
@@ -307,7 +318,7 @@ Usage:
 Env:
   BACKUP_DIR  RETENTION  KUMA_CONTAINER_NAME  KUMA_VOLUME_NAME
   STOP_DURING_BACKUP  TELEGRAM_BOT_TOKEN  TELEGRAM_CHAT_ID  TELEGRAM_MENTION
-  INSTALL_BIN_NAME  VERSION
+  INSTALL_BIN_NAME  VERSION  KUMA_IMAGE_CANDIDATES
 EOF
 }
 
