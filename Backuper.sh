@@ -9,7 +9,7 @@ set -euo pipefail
 ###############################################
 
 # Version (برای نمایش در هدر)
-VERSION="${VERSION:-v1.0.0}"
+VERSION="${VERSION:-v1.1.0}"
 
 # Upstream Backuper (original menu by erfjab)
 UPSTREAM_BACKUPER_URL="${UPSTREAM_BACKUPER_URL:-https://github.com/erfjab/Backuper/raw/master/backuper.sh}"
@@ -24,9 +24,9 @@ INSTALL_BIN_PATH="/usr/local/bin/${INSTALL_BIN_NAME}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/uptime-kuma}"
 RETENTION="${RETENTION:-7}"
 
-# Docker names (change if your compose/docker run names differ)
-KUMA_CONTAINER_NAME="${KUMA_CONTAINER_NAME:-uptime-kuma}"
-KUMA_VOLUME_NAME="${KUMA_VOLUME_NAME:-uptime-kuma}"
+# Defaults (override only if می‌خواهی ثابت باشند؛ در حالت عادی auto-detect فعال است)
+KUMA_CONTAINER_NAME="${KUMA_CONTAINER_NAME:-}"
+KUMA_VOLUME_NAME="${KUMA_VOLUME_NAME:-}"
 
 # For SQLite consistency, stop the container briefly during backup/restore
 STOP_DURING_BACKUP="${STOP_DURING_BACKUP:-true}"
@@ -45,9 +45,43 @@ log() { echo "[$(date +'%F %T')] $*"; }
 ensure_dir() { mkdir -p "$BACKUP_DIR"; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found."; exit 127; }; }
 
+# ANSI for menu
+RESET='\033[0m'; FG_CYAN='\033[36m'; FG_GREEN='\033[32m'; FG_YELLOW='\033[33m'; FG_WHITE='\033[37m'
+
+###############################################
+# ======== Auto-detect Kuma container/volume ===
+###############################################
+detect_kuma() {
+  require_cmd docker
+
+  # 1) اگر نام کانتینر از قبل ست نشده، بر اساس ایمیج پیدا کن
+  if [ -z "${KUMA_CONTAINER_NAME:-}" ]; then
+    # اول کانتینرهای در حال اجرا، بعد کل کانتینرها
+    KUMA_CONTAINER_NAME="$(docker ps --filter 'ancestor=louislam/uptime-kuma' --format '{{.Names}}' | head -n1 || true)"
+    [ -z "$KUMA_CONTAINER_NAME" ] && \
+      KUMA_CONTAINER_NAME="$(docker ps -a --filter 'ancestor=louislam/uptime-kuma' --format '{{.Names}}' | head -n1 || true)"
+  fi
+
+  if [ -z "${KUMA_CONTAINER_NAME:-}" ]; then
+    echo "ERROR: No container with image 'louislam/uptime-kuma' found."
+    echo "Hint: run 'docker ps -a' and ensure Uptime Kuma is installed."
+    exit 1
+  fi
+
+  # 2) اگر نام ولیوم مشخص نیست، سعی کن از Mount مربوط به /app/data در همان کانتینر بخوانی
+  if [ -z "${KUMA_VOLUME_NAME:-}" ]; then
+    # اگر Mount از نوع Volume باشد، اسم نام‌دار برمی‌گردد؛ اگر bind باشد، خروجی خالی است
+    KUMA_VOLUME_NAME="$(docker inspect "$KUMA_CONTAINER_NAME" \
+      -f '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true)"
+  fi
+}
+
+###############################################
+# ======= Docker helpers (post-detect) =========
+###############################################
 docker_container_exists() { docker ps -a --format '{{.Names}}' | grep -qx "${KUMA_CONTAINER_NAME}"; }
 docker_container_running() { docker ps --format '{{.Names}}' | grep -qx "${KUMA_CONTAINER_NAME}"; }
-docker_volume_exists() { docker volume ls --format '{{.Name}}' | grep -qx "${KUMA_VOLUME_NAME}"; }
+docker_volume_exists() { [ -n "${KUMA_VOLUME_NAME:-}" ] && docker volume ls --format '{{.Name}}' | grep -qx "${KUMA_VOLUME_NAME}"; }
 
 stop_container_if_requested() {
   STOPPED=0
@@ -96,6 +130,7 @@ pause() { read -rp "ادامه با Enter..." _ || true; }
 # ============ Uptime Kuma Add-on =============
 ###############################################
 kuma_backup() {
+  detect_kuma
   require_cmd docker
   ensure_dir
   local OUT="$BACKUP_DIR/uptime-kuma-$(timestamp).tar.gz"
@@ -104,15 +139,15 @@ kuma_backup() {
   trap start_container_if_stopped EXIT
 
   if docker_volume_exists; then
-    log "Backing up from named volume '${KUMA_VOLUME_NAME}' -> ${OUT}"
+    log "Detected volume '${KUMA_VOLUME_NAME}'. Backing up -> ${OUT}"
     docker run --rm -v "${KUMA_VOLUME_NAME}:/data:ro" -v "${BACKUP_DIR}:/backup" \
       alpine sh -c "cd /data && tar -czf /backup/$(basename "$OUT") ."
   elif docker_container_exists; then
-    log "Named volume not found; backing up via --volumes-from ${KUMA_CONTAINER_NAME} -> ${OUT}"
+    log "No named volume detected; using --volumes-from '${KUMA_CONTAINER_NAME}' (/app/data) -> ${OUT}"
     docker run --rm --volumes-from "${KUMA_CONTAINER_NAME}" -v "${BACKUP_DIR}:/backup" \
       alpine sh -c "cd /app/data && tar -czf /backup/$(basename "$OUT") ."
   else
-    log "ERROR: Neither volume '${KUMA_VOLUME_NAME}' nor container '${KUMA_CONTAINER_NAME}' exists."
+    log "ERROR: After detection, neither volume nor container is usable."
     exit 1
   fi
 
@@ -121,11 +156,12 @@ kuma_backup() {
 
   log "Backup saved: ${OUT}"
   apply_retention "${RETENTION}"
-  send_telegram_document "${OUT}" "✅ Uptime Kuma backup created at $(now_human). ${TELEGRAM_MENTION}"
+  send_telegram_document "${OUT}" "✅ Uptime Kuma backup @ $(now_human) — ${TELEGRAM_MENTION}"
   log "Done."
 }
 
 kuma_restore() {
+  detect_kuma
   require_cmd docker
   local ARCHIVE="${1:-}"
   if [ -z "$ARCHIVE" ] || [ ! -f "$ARCHIVE" ]; then
@@ -143,15 +179,15 @@ kuma_restore() {
   trap start_container_if_stopped EXIT
 
   if docker_volume_exists; then
-    log "Restoring into named volume '${KUMA_VOLUME_NAME}' from ${ARCHIVE}"
+    log "Restoring into volume '${KUMA_VOLUME_NAME}' from ${ARCHIVE}"
     docker run --rm -v "${KUMA_VOLUME_NAME}:/data" -v "$(dirname "$ARCHIVE"):/backup:ro" \
       alpine sh -c "rm -rf /data/* && tar -xzf /backup/$(basename "$ARCHIVE") -C /data"
   elif docker_container_exists; then
-    log "Volume not found; restoring via --volumes-from ${KUMA_CONTAINER_NAME} from ${ARCHIVE}"
+    log "No named volume; restoring via --volumes-from ${KUMA_CONTAINER_NAME} to /app/data"
     docker run --rm --volumes-from "${KUMA_CONTAINER_NAME}" -v "$(dirname "$ARCHIVE"):/backup:ro" \
       alpine sh -c "rm -rf /app/data/* && tar -xzf /backup/$(basename "$ARCHIVE") -C /app/data"
   else
-    log "ERROR: No target volume/container found."
+    log "ERROR: Target not found for restore."
     exit 1
   fi
 
@@ -204,10 +240,6 @@ run_upstream_menu() {
 ###############################################
 # ================== UI (Erfan-style) =========
 ###############################################
-# ANSI colors
-RESET='\033[0m'; BOLD='\033[1m'
-FG_CYAN='\033[36m'; FG_GREEN='\033[32m'; FG_YELLOW='\033[33m'; FG_WHITE='\033[37m'
-
 print_header() {
   clear
   echo -e "${FG_CYAN}=======  Backuper Menu [${VERSION}]  =======${RESET}"
