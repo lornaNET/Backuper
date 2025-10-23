@@ -8,7 +8,7 @@ set -euo pipefail
 # ========== User-configurable section ==========
 ###############################################
 
-VERSION="${VERSION:-v1.2.0}"
+VERSION="${VERSION:-v1.2.1}"
 
 # Upstream Backuper (original menu by erfjab)
 UPSTREAM_BACKUPER_URL="${UPSTREAM_BACKUPER_URL:-https://github.com/erfjab/Backuper/raw/master/backuper.sh}"
@@ -48,7 +48,7 @@ ensure_dir() { mkdir -p "$BACKUP_DIR"; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found."; exit 127; }; }
 
 # ANSI for menu
-RESET='\033[0m'; FG_CYAN='\033[36m]'; FG_GREEN='\033[32m'; FG_YELLOW='\033[33m'; FG_WHITE='\033[37m'
+RESET='\033[0m'; FG_CYAN='\033[36m'; FG_GREEN='\033[32m'; FG_YELLOW='\033[33m'; FG_WHITE='\033[37m'
 
 ###############################################
 # ======== Auto-detect Kuma container/volume ===
@@ -81,7 +81,7 @@ detect_kuma() {
     exit 1
   fi
 
-  # 2) ولیوم (Mount مقصد /app/data). اگر bind باشد، Name خالی می‌ماند که اشکالی ندارد.
+  # 2) ولیومِ /app/data (اگه bind باشه Name خالی می‌مونه که اشکال نداره)
   if [ -z "${KUMA_VOLUME_NAME:-}" ]; then
     KUMA_VOLUME_NAME="$(docker inspect "$KUMA_CONTAINER_NAME" \
       -f '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null || true)"
@@ -139,6 +139,42 @@ apply_retention() {
 pause() { read -rp "ادامه با Enter..." _ || true; }
 
 ###############################################
+# ===== helper: smart archive resolver ========
+###############################################
+# ورودی: رشتهٔ کاربر (می‌تونه خالی، اسم فایل، بخشی از اسم یا مسیر کامل باشه)
+# خروجی: مسیر آرشیو انتخاب‌شده یا رشتهٔ خالی
+select_archive() {
+  local in="${1:-}"
+  local out=""
+
+  # اگر خالی بود، آخرین بکاپ را انتخاب کن
+  if [ -z "$in" ]; then
+    out="$(ls -1t "$BACKUP_DIR"/uptime-kuma-*.tar.gz 2>/dev/null | head -n1 || true)"
+    echo "$out"; return 0
+  fi
+
+  # اگر مسیر کاملِ موجود است
+  if [ -f "$in" ]; then
+    echo "$in"; return 0
+  fi
+
+  # اگر فقط نام فایل در BACKUP_DIR موجود است
+  if [ -f "$BACKUP_DIR/$in" ]; then
+    echo "$BACKUP_DIR/$in"; return 0
+  fi
+
+  # اگر بخشی از نام داده شده: در BACKUP_DIR بگرد و جدیدترینِ منطبق را بردار
+  out="$(ls -1t "$BACKUP_DIR"/uptime-kuma-*.tar.gz 2>/dev/null | grep -F "$in" | head -n1 || true)"
+  if [ -n "$out" ]; then
+    echo "$out"; return 0
+  fi
+
+  # تلاش نهایی: هر tar.gz در BACKUP_DIR که شامل in باشد
+  out="$(ls -1t "$BACKUP_DIR"/*"$in"*.tar.gz 2>/dev/null | head -n1 || true)"
+  echo "$out"
+}
+
+###############################################
 # ============ Uptime Kuma Add-on =============
 ###############################################
 kuma_backup() {
@@ -173,13 +209,23 @@ kuma_backup() {
 }
 
 kuma_restore() {
-  detect_kuma
-  local ARCHIVE="${1:-}"
+  # 1) انتخاب فایل بکاپ (هوشمند)
+  local ARCHIVE_IN="${1:-}"
+  local ARCHIVE
+  ARCHIVE="$(select_archive "$ARCHIVE_IN")"
+
   if [ -z "$ARCHIVE" ] || [ ! -f "$ARCHIVE" ]; then
-    echo "Usage: $0 kuma-restore /path/to/uptime-kuma-YYYYMMDD-HHMMSS.tar.gz"
+    echo "Cannot find backup archive (input: '${ARCHIVE_IN}')."
+    echo "Tip: ls -1t $BACKUP_DIR/*.tar.gz | head -n5"
     exit 2
   fi
+  log "Using backup archive: $ARCHIVE"
 
+  # 2) تشخیص مقصد
+  detect_kuma
+  require_cmd docker
+
+  # 3) Stop/restore/start
   if docker_container_exists && docker_container_running; then
     log "Stopping container ${KUMA_CONTAINER_NAME} for restore ..."
     docker stop "${KUMA_CONTAINER_NAME}" >/dev/null || true
@@ -271,10 +317,9 @@ main_menu() {
       1) run_upstream_menu; pause ;;
       2) kuma_backup; pause ;;
       3)
-         echo -n "Enter backup archive path: "
+         echo -n "Enter backup archive path (empty = latest / name or partial is OK): "
          read -r arch
-         [ -z "$arch" ] && { echo "Canceled."; pause; continue; }
-         kuma_restore "$arch"; pause
+         kuma_restore "${arch:-}"; pause
          ;;
       0) echo "Bye."; exit 0 ;;
       *) echo "Invalid option."; pause ;;
@@ -287,7 +332,8 @@ main_menu() {
 ###############################################
 install_self() {
   require_cmd install
-  local src="$(readlink -f "$0" 2>/dev/null || realpath "$0")"
+  local src
+  src="$(readlink -f "$0" 2>/dev/null || realpath "$0")"
   sudo install -m 0755 "$src" "$INSTALL_BIN_PATH"
   echo "✅ Installed: $INSTALL_BIN_PATH"
   echo "Run: sudo $INSTALL_BIN_NAME"
@@ -311,7 +357,11 @@ Usage:
   $0                 # interactive menu
   $0 upstream
   $0 kuma-backup
-  $0 kuma-restore /path/to/uptime-kuma-YYYYMMDD-HHMMSS.tar.gz
+  # ری‌استور هوشمند:
+  #   بدون آرگومان = آخرین بکاپ
+  #   اسم فایل یا بخشی از اسم = از BACKUP_DIR پیدا می‌کند
+  #   مسیر کامل = همان
+  $0 kuma-restore [archive-or-partial-or-full-path]
   $0 install         # copy to /usr/local/bin/${INSTALL_BIN_NAME}
   $0 uninstall       # remove installed launcher
 
