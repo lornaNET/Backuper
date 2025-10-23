@@ -1,25 +1,15 @@
 #!/usr/bin/env bash
 # Backuper (Unified Launcher) + Uptime Kuma Add-on + Installer
-# - Top-level menu:
-#     1) Run ORIGINAL Backuper menu (from erfjab/Backuper)
-#     2) Uptime Kuma Backup (built-in)
-#     3) Uptime Kuma Restore (built-in)
-#     0) Exit
-# - Direct CLI:
-#     Backuper.sh                # menu
-#     Backuper.sh upstream       # run original Backuper
-#     Backuper.sh kuma-backup
-#     Backuper.sh kuma-restore /path/to/archive.tar.gz
-#     Backuper.sh install        # install to /usr/local/bin/lornaNET  (default)
-#     Backuper.sh uninstall      # remove installed launcher
-#
-# License: MIT
+# MIT
 
 set -euo pipefail
 
 ###############################################
 # ========== User-configurable section ==========
 ###############################################
+
+# Version (برای نمایش در هدر)
+VERSION="${VERSION:-v1.0.0}"
 
 # Upstream Backuper (original menu by erfjab)
 UPSTREAM_BACKUPER_URL="${UPSTREAM_BACKUPER_URL:-https://github.com/erfjab/Backuper/raw/master/backuper.sh}"
@@ -212,37 +202,39 @@ run_upstream_menu() {
 }
 
 ###############################################
-# ================== UI =======================
+# ================== UI (Erfan-style) =========
 ###############################################
+# ANSI colors
+RESET='\033[0m'; BOLD='\033[1m'
+FG_CYAN='\033[36m'; FG_GREEN='\033[32m'; FG_YELLOW='\033[33m'; FG_WHITE='\033[37m'
+
 print_header() {
   clear
-  cat <<'HDR'
-=========================================
-        Backuper (Unified Launcher)
-=========================================
-1) اجرای منوی اصلی Backuper (از گیت‌هاب erfjab)
-2) بکاپ Uptime Kuma
-3) ری‌استور Uptime Kuma
-0) خروج
-HDR
+  echo -e "${FG_CYAN}=======  Backuper Menu [${VERSION}]  =======${RESET}"
+  echo
+  echo -e "  ${FG_GREEN}1)${RESET} ${FG_WHITE}Run ORIGINAL Backuper (erfjab)${RESET}"
+  echo -e "  ${FG_GREEN}2)${RESET} ${FG_WHITE}Uptime Kuma Backup${RESET}"
+  echo -e "  ${FG_GREEN}3)${RESET} ${FG_WHITE}Uptime Kuma Restore${RESET}"
+  echo -e "  ${FG_GREEN}0)${RESET} ${FG_WHITE}Exit${RESET}"
+  echo
+  echo -en "${FG_YELLOW}► Choose an option: ${RESET}"
 }
 
 main_menu() {
   while true; do
     print_header
-    echo -n "انتخاب: "
     read -r opt
     case "${opt:-}" in
       1) run_upstream_menu; pause ;;
       2) kuma_backup; pause ;;
       3)
-         echo -n "مسیر فایل آرشیو بکاپ را وارد کنید: "
+         echo -n "Enter backup archive path: "
          read -r arch
-         [ -z "$arch" ] && { echo "لغو شد."; pause; continue; }
+         [ -z "$arch" ] && { echo "Canceled."; pause; continue; }
          kuma_restore "$arch"; pause
          ;;
-      0) echo "خروج."; exit 0 ;;
-      *) echo "انتخاب نامعتبر."; pause ;;
+      0) echo "Bye."; exit 0 ;;
+      *) echo "Invalid option."; pause ;;
     esac
   done
 }
@@ -273,22 +265,17 @@ uninstall_self() {
 usage() {
 cat <<EOF
 Usage:
-  # Interactive menu
-  $0
-
-  # Direct:
+  $0                 # interactive menu
   $0 upstream
   $0 kuma-backup
   $0 kuma-restore /path/to/uptime-kuma-YYYYMMDD-HHMMSS.tar.gz
-  $0 install        # copy to /usr/local/bin/${INSTALL_BIN_NAME}
-  $0 uninstall      # remove installed launcher
+  $0 install         # copy to /usr/local/bin/${INSTALL_BIN_NAME}
+  $0 uninstall       # remove installed launcher
 
-Env overrides:
-  BACKUP_DIR=/var/backups/uptime-kuma  RETENTION=7
-  KUMA_CONTAINER_NAME=uptime-kuma      KUMA_VOLUME_NAME=uptime-kuma
-  STOP_DURING_BACKUP=true
-  TELEGRAM_BOT_TOKEN=  TELEGRAM_CHAT_ID=  TELEGRAM_MENTION=${TELEGRAM_MENTION}
-  INSTALL_BIN_NAME=${INSTALL_BIN_NAME}
+Env:
+  BACKUP_DIR  RETENTION  KUMA_CONTAINER_NAME  KUMA_VOLUME_NAME
+  STOP_DURING_BACKUP  TELEGRAM_BOT_TOKEN  TELEGRAM_CHAT_ID  TELEGRAM_MENTION
+  INSTALL_BIN_NAME  VERSION
 EOF
 }
 
