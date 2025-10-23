@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# Unified Backuper Launcher + Uptime Kuma Add-on (single file)
-# - Shows a top-level menu:
+# Backuper (Unified Launcher) + Uptime Kuma Add-on + Installer
+# - Top-level menu:
 #     1) Run ORIGINAL Backuper menu (from erfjab/Backuper)
-#     2) Uptime Kuma Backup (built-in here)
-#     3) Uptime Kuma Restore (built-in here)
-# - No need to modify upstream files; we just fetch & run them.
-# - MIT License
+#     2) Uptime Kuma Backup (built-in)
+#     3) Uptime Kuma Restore (built-in)
+#     0) Exit
+# - Direct CLI:
+#     Backuper.sh                # menu
+#     Backuper.sh upstream       # run original Backuper
+#     Backuper.sh kuma-backup
+#     Backuper.sh kuma-restore /path/to/archive.tar.gz
+#     Backuper.sh install        # install to /usr/local/bin/lornaNET  (default)
+#     Backuper.sh uninstall      # remove installed launcher
+#
+# License: MIT
 
 set -euo pipefail
 
@@ -13,12 +21,16 @@ set -euo pipefail
 # ========== User-configurable section ==========
 ###############################################
 
-# Upstream Backuper (original menu) - leave as is unless you fork it
+# Upstream Backuper (original menu by erfjab)
 UPSTREAM_BACKUPER_URL="${UPSTREAM_BACKUPER_URL:-https://github.com/erfjab/Backuper/raw/master/backuper.sh}"
 UPSTREAM_CACHE_PATH="${UPSTREAM_CACHE_PATH:-/tmp/backuper_upstream.sh}"
 UPSTREAM_CACHE_TTL_HOURS="${UPSTREAM_CACHE_TTL_HOURS:-12}"
 
-# Uptime Kuma backup settings (defaults)
+# Install/uninstall
+INSTALL_BIN_NAME="${INSTALL_BIN_NAME:-lornaNET}"   # binary name in /usr/local/bin
+INSTALL_BIN_PATH="/usr/local/bin/${INSTALL_BIN_NAME}"
+
+# Uptime Kuma backup settings
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/uptime-kuma}"
 RETENTION="${RETENTION:-7}"
 
@@ -29,14 +41,13 @@ KUMA_VOLUME_NAME="${KUMA_VOLUME_NAME:-uptime-kuma}"
 # For SQLite consistency, stop the container briefly during backup/restore
 STOP_DURING_BACKUP="${STOP_DURING_BACKUP:-true}"
 
-# Telegram notifications (optional). If both TOKEN and CHAT_ID are set,
-# backup archives will be sent with a caption mentioning TELEGRAM_MENTION.
+# Telegram notifications (optional)
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
 TELEGRAM_MENTION="${TELEGRAM_MENTION:-@lorna_support}"
 
 ###############################################
-# =============== Utilities ====================
+# ================= Utilities ==================
 ###############################################
 timestamp() { date +"%Y%m%d-%H%M%S"; }
 now_human() { date +'%F %T'; }
@@ -64,7 +75,6 @@ start_container_if_stopped() {
 }
 
 send_telegram_document() {
-  # $1=file path, $2=caption
   local FILE="$1" CAPTION="$2"
   if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
     require_cmd curl
@@ -198,7 +208,6 @@ run_upstream_menu() {
     echo "ERROR: Could not retrieve upstream backuper from $UPSTREAM_BACKUPER_URL"
     return 1
   fi
-  # hand over to original menu (it has its own prompts for Marzban/Marzneshin/etc.)
   bash "$UPSTREAM_CACHE_PATH"
 }
 
@@ -209,7 +218,7 @@ print_header() {
   clear
   cat <<'HDR'
 =========================================
-         Backuper (Unified Launcher)
+        Backuper (Unified Launcher)
 =========================================
 1) اجرای منوی اصلی Backuper (از گیت‌هاب erfjab)
 2) بکاپ Uptime Kuma
@@ -226,7 +235,7 @@ main_menu() {
     case "${opt:-}" in
       1) run_upstream_menu; pause ;;
       2) kuma_backup; pause ;;
-      3) 
+      3)
          echo -n "مسیر فایل آرشیو بکاپ را وارد کنید: "
          read -r arch
          [ -z "$arch" ] && { echo "لغو شد."; pause; continue; }
@@ -234,8 +243,28 @@ main_menu() {
          ;;
       0) echo "خروج."; exit 0 ;;
       *) echo "انتخاب نامعتبر."; pause ;;
-    escase
+    esac
   done
+}
+
+###############################################
+# ============== Install / Uninstall ==========
+###############################################
+install_self() {
+  require_cmd install
+  local src="$(readlink -f "$0" 2>/dev/null || realpath "$0")"
+  sudo install -m 0755 "$src" "$INSTALL_BIN_PATH"
+  echo "✅ Installed: $INSTALL_BIN_PATH"
+  echo "Run: sudo $INSTALL_BIN_NAME"
+}
+
+uninstall_self() {
+  if [ -e "$INSTALL_BIN_PATH" ]; then
+    sudo rm -f "$INSTALL_BIN_PATH"
+    echo "🗑️  Removed: $INSTALL_BIN_PATH"
+  else
+    echo "Nothing to remove at $INSTALL_BIN_PATH"
+  fi
 }
 
 ###############################################
@@ -244,19 +273,22 @@ main_menu() {
 usage() {
 cat <<EOF
 Usage:
-  # Interactive menu (recommended)
+  # Interactive menu
   $0
 
-  # Direct commands (non-interactive):
-  $0 upstream         # fetch & run original Backuper menu
-  $0 kuma-backup      # run Uptime Kuma backup
+  # Direct:
+  $0 upstream
+  $0 kuma-backup
   $0 kuma-restore /path/to/uptime-kuma-YYYYMMDD-HHMMSS.tar.gz
+  $0 install        # copy to /usr/local/bin/${INSTALL_BIN_NAME}
+  $0 uninstall      # remove installed launcher
 
-Env (override defaults as needed):
+Env overrides:
   BACKUP_DIR=/var/backups/uptime-kuma  RETENTION=7
   KUMA_CONTAINER_NAME=uptime-kuma      KUMA_VOLUME_NAME=uptime-kuma
   STOP_DURING_BACKUP=true
-  TELEGRAM_BOT_TOKEN=   TELEGRAM_CHAT_ID=   TELEGRAM_MENTION=${TELEGRAM_MENTION}
+  TELEGRAM_BOT_TOKEN=  TELEGRAM_CHAT_ID=  TELEGRAM_MENTION=${TELEGRAM_MENTION}
+  INSTALL_BIN_NAME=${INSTALL_BIN_NAME}
 EOF
 }
 
@@ -266,6 +298,8 @@ main() {
     upstream) run_upstream_menu ;;
     kuma-backup) kuma_backup ;;
     kuma-restore) kuma_restore "${2:-}" ;;
+    install) install_self ;;
+    uninstall) uninstall_self ;;
     -h|--help|help) usage ;;
     *) main_menu ;;
   esac
